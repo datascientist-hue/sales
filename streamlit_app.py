@@ -295,90 +295,365 @@ def _compute_kpis(df: pd.DataFrame) -> dict[str, Any]:
 
 
 @st.cache_data(show_spinner=False)
-def load_data(csv_mtime: float, parquet_mtime: float | None):
-    source = "parquet"
-    if PARQUET_PATH.exists() and parquet_mtime is not None and parquet_mtime >= csv_mtime:
-        df = pd.read_parquet(PARQUET_PATH)
-    else:
-        df = _prepare_dataframe_from_csv()
-        df.to_parquet(PARQUET_PATH, index=False)
-        source = "csv"
+def load_data(parquet_mtime: float):
+    if parquet_mtime <= 0:
+        raise FileNotFoundError(f"Parquet file not found: {PARQUET_PATH}")
 
+    df = pd.read_parquet(PARQUET_PATH)
     kpis = _compute_kpis(df)
-    return df, kpis, source
+    return df, kpis, "parquet"
 
 
 def _chunk(items: list[tuple[str, str]], size: int) -> list[list[tuple[str, str]]]:
     return [items[i : i + size] for i in range(0, len(items), size)]
 
 
-def main():
-    st.set_page_config(page_title="Primary Sales Dashboard", layout="wide")
-    st.title("📊 Primary Sales — 5-Year Analysis")
-    st.caption("Pivot table + filters + CSV export")
+_CARD_COLORS = [
+    "#0078d4",  # Microsoft blue
+    "#107c10",  # green
+    "#ff8c00",  # orange
+    "#e3008c",  # pink/magenta
+    "#00b294",  # teal
+    "#8764b8",  # purple
+    "#038387",  # dark teal
+    "#ca5010",  # rust
+    "#004e8c",  # dark blue
+    "#498205",  # olive green
+    "#c239b3",  # orchid
+    "#0099bc",  # cerulean
+]
 
-    if not CSV_PATH.exists():
-        st.error(f"Data file not found: {CSV_PATH}")
+_PBI_CSS = """
+<style>
+/* ══════════════════════════════════════════════
+   FORCE LIGHT MODE — override system dark theme
+   ══════════════════════════════════════════════ */
+:root {
+    color-scheme: light !important;
+}
+
+html, body, .stApp, [data-testid="stAppViewContainer"],
+[data-testid="stMain"], .main, .block-container,
+[class*="css"] {
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif !important;
+    background-color: #f3f2f1 !important;
+    color: #201f1e !important;
+}
+
+/* ── Native Streamlit header — transparent, keep ⋮ menu button ── */
+header[data-testid="stHeader"] {
+    background-color: transparent !important;
+    border-bottom: none !important;
+}
+/* Make Deploy / ⋮ button text dark so it's readable */
+header[data-testid="stHeader"] button,
+header[data-testid="stHeader"] a,
+header[data-testid="stHeader"] span,
+header[data-testid="stHeader"] svg {
+    color: #201f1e !important;
+    fill: #201f1e !important;
+}
+/* Tight top padding below the fixed header */
+.block-container {
+    padding-top: 1rem !important;
+}
+/* Hide only the footer watermark */
+footer { visibility: hidden; }
+
+/* ── All input / select widget backgrounds → white ── */
+[data-baseweb="input"],
+[data-baseweb="base-input"],
+[data-baseweb="select"],
+[data-baseweb="popover"],
+[role="listbox"],
+[data-baseweb="menu"],
+div[data-baseweb="select"] > div,
+div[data-baseweb="select"] > div > div,
+.stSelectbox > div > div,
+.stMultiSelect > div > div,
+[data-testid="stMultiSelect"] > div,
+[data-testid="stSelectbox"] > div {
+    background-color: #ffffff !important;
+    color: #201f1e !important;
+    border-color: #c8c6c4 !important;
+}
+
+/* Input text color */
+input, textarea, select,
+[data-baseweb="input"] input,
+[data-baseweb="select"] input {
+    color: #201f1e !important;
+    background-color: #ffffff !important;
+}
+
+/* Dropdown list items */
+[role="option"],
+[data-baseweb="menu"] li,
+[data-baseweb="list-item"] {
+    background-color: #ffffff !important;
+    color: #201f1e !important;
+}
+[role="option"]:hover,
+[data-baseweb="menu"] li:hover {
+    background-color: #deecf9 !important;
+    color: #0078d4 !important;
+}
+
+/* All labels */
+label, .stSelectbox label, .stMultiSelect label,
+[data-testid="stWidgetLabel"] {
+    color: #323130 !important;
+    font-size: 0.78rem !important;
+    font-weight: 600 !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.04em !important;
+}
+
+/* Caption / small text */
+.stCaption, small, [data-testid="stCaptionContainer"] {
+    color: #605e5c !important;
+}
+
+/* ── Main content area ── */
+.block-container {
+    padding-top: 1rem !important;
+    padding-left: 1.5rem !important;
+    padding-right: 1.5rem !important;
+    max-width: 100% !important;
+    background-color: #f3f2f1 !important;
+}
+
+/* ── Sidebar ── */
+[data-testid="stSidebar"],
+[data-testid="stSidebar"] > div {
+    background-color: #ffffff !important;
+    border-right: 1px solid #e1dfdd !important;
+}
+[data-testid="stSidebar"] .block-container {
+    padding-top: 0 !important;
+    background-color: #ffffff !important;
+}
+[data-testid="stSidebar"] hr {
+    border-color: #e1dfdd !important;
+    margin: 6px 0 12px 0;
+}
+.sidebar-header {
+    background: #0078d4;
+    color: #ffffff !important;
+    padding: 13px 18px;
+    font-size: 0.82rem;
+    font-weight: 700;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    margin: -1rem -1rem 16px -1rem;
+}
+
+/* ── Dashboard header bar ── */
+.pbi-header {
+    background: #ffffff;
+    color: #201f1e;
+    padding: 12px 20px;
+    border-radius: 4px;
+    margin-bottom: 18px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    border-left: 5px solid #0078d4;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.09);
+}
+.pbi-header-title {
+    font-size: 1.1rem;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    color: #0078d4 !important;
+}
+.pbi-header-meta {
+    font-size: 0.75rem;
+    color: #605e5c;
+    text-align: right;
+    line-height: 1.6;
+}
+.pbi-header-dot {
+    display: inline-block;
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: #6bb700;
+    margin-right: 5px;
+    vertical-align: middle;
+}
+
+/* ── Section heading ── */
+.pbi-section-title {
+    font-size: 0.72rem;
+    font-weight: 700;
+    color: #605e5c;
+    text-transform: uppercase;
+    letter-spacing: 0.10em;
+    border-bottom: 2px solid #0078d4;
+    padding-bottom: 5px;
+    margin: 22px 0 14px 0;
+}
+
+/* ── KPI card tiles ── */
+.pbi-card {
+    background: #ffffff !important;
+    border-radius: 3px;
+    padding: 14px 16px 12px 16px;
+    border-top: 4px solid #0078d4;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.09), 0 1px 2px rgba(0,0,0,0.05);
+    min-height: 88px;
+    transition: box-shadow 0.15s;
+}
+.pbi-card:hover { box-shadow: 0 4px 14px rgba(0,0,0,0.13); }
+.pbi-card-label {
+    font-size: 0.67rem;
+    font-weight: 600;
+    color: #605e5c !important;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 6px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.pbi-card-value {
+    font-size: 1.35rem;
+    font-weight: 700;
+    color: #201f1e !important;
+    line-height: 1.1;
+    word-break: break-word;
+}
+.pbi-card-positive { color: #107c10 !important; font-size: 1.35rem; font-weight: 700; }
+.pbi-card-negative { color: #a4262c !important; font-size: 1.35rem; font-weight: 700; }
+
+/* ── Pivot config bar ── */
+.pbi-pivot-cfg {
+    background: #f8f7f6 !important;
+    border: 1px solid #e1dfdd;
+    border-radius: 3px;
+    padding: 12px 16px 4px 16px;
+    margin-bottom: 12px;
+}
+
+/* ── Dataframe table ── */
+[data-testid="stDataFrame"],
+[data-testid="stDataFrame"] iframe {
+    border: 1px solid #e1dfdd !important;
+    border-radius: 2px;
+    background: #ffffff !important;
+}
+
+/* ── Multiselect tags ── */
+[data-baseweb="tag"] {
+    background-color: #deecf9 !important;
+    color: #0078d4 !important;
+    border-radius: 2px !important;
+}
+[data-baseweb="tag"] span { color: #0078d4 !important; }
+
+/* ── Export / download button ── */
+.stDownloadButton > button {
+    background-color: #0078d4 !important;
+    color: #ffffff !important;
+    border: none !important;
+    border-radius: 2px !important;
+    font-size: 0.78rem !important;
+    font-weight: 600 !important;
+    padding: 6px 18px !important;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+.stDownloadButton > button:hover { background-color: #106ebe !important; }
+
+/* ── Warning / info / error boxes ── */
+[data-testid="stAlert"] {
+    background-color: #fff4ce !important;
+    color: #323130 !important;
+    border-left-color: #ffaa44 !important;
+}
+
+/* ── Spinner ── */
+[data-testid="stSpinner"] p { color: #0078d4 !important; font-weight: 600; }
+</style>
+"""
+
+
+def _kpi_card_html(label: str, value: str, color: str) -> str:
+    is_pct = "%" in value
+    is_negative = is_pct and value.strip().startswith("-")
+    val_class = "pbi-card-negative" if is_negative else ("pbi-card-positive" if is_pct else "pbi-card-value")
+    if is_pct:
+        value_html = f'<div class="{val_class}" style="font-size:1.35rem;font-weight:700;">{value}</div>'
+    else:
+        value_html = f'<div class="pbi-card-value">{value}</div>'
+    return (
+        f'<div class="pbi-card" style="border-top-color:{color};">'
+        f'<div class="pbi-card-label">{label}</div>'
+        f'{value_html}'
+        f'</div>'
+    )
+
+
+def _section_title_html(title: str, icon: str = "") -> str:
+    prefix = f"{icon}&nbsp;&nbsp;" if icon else ""
+    return f'<div class="pbi-section-title">{prefix}{title}</div>'
+
+
+def main():
+    st.set_page_config(
+        page_title="Primary Sales Dashboard",
+        page_icon="📊",
+        layout="wide",
+        initial_sidebar_state="expanded",
+    )
+
+    # Inject Power BI CSS
+    st.markdown(_PBI_CSS, unsafe_allow_html=True)
+
+    if not PARQUET_PATH.exists():
+        st.error(f"Parquet data file not found: {PARQUET_PATH}")
         st.stop()
 
-    csv_mtime = CSV_PATH.stat().st_mtime
-    parquet_mtime = PARQUET_PATH.stat().st_mtime if PARQUET_PATH.exists() else None
+    parquet_mtime = PARQUET_PATH.stat().st_mtime
     mapping_mtime = MAPPING_PATH.stat().st_mtime if MAPPING_PATH.exists() else None
 
-    with st.spinner("Loading data..."):
-        df, kpis, source = load_data(csv_mtime, parquet_mtime)
+    with st.spinner("Loading data…"):
+        df, kpis, source = load_data(parquet_mtime)
 
     mapping_df = _load_category_mapping(mapping_mtime)
     df = _attach_category_mapping(df, mapping_df)
 
-    st.caption(f"Loaded {kpis['totalRows']:,} rows (source: {source.upper()})")
+    # ── Sidebar: filters ──────────────────────────────────────────────────────
+    with st.sidebar:
+        st.markdown('<div class="sidebar-header">🔽&nbsp; Filters</div>', unsafe_allow_html=True)
 
-    card_items = [
-        ("Best FY by Volume", str(kpis["bestFY"])),
-        ("Peak Volume (Tonnes)", f"{kpis['peakVolume']:,.2f}"),
-        ("Total Volume (Tonnes)", f"{kpis['totalVolume']:,.2f}"),
-        ("Total Net Value", str(kpis["totalNetValue"])),
-        ("Avg Per Litre Value", f"₹{kpis['avgPerLitreValue']:,.2f}"),
-        ("Avg Per Litre Cost", f"₹{kpis['avgPerLitreCost']:,.2f}"),
-    ]
-
-    if kpis.get("cagrByYear"):
-        for cagr_item in kpis["cagrByYear"]:
-            card_items.append(
-                (
-                    f"CAGR {cagr_item['fromFY']} to {cagr_item['toFY']}",
-                    f"{cagr_item['cagrPct']:,.2f}%",
-                )
-            )
-    else:
-        cagr_fallback = "—" if kpis.get("cagrPct") is None else f"{kpis['cagrPct']:,.2f}%"
-        card_items.append(("CAGR % (Net Value)", cagr_fallback))
-
-    for growth_item in kpis.get("yearlyGrowth", []):
-        card_items.append(
-            (
-                f"Growth {growth_item['fy']} vs {growth_item['previousFY']}",
-                f"{growth_item['growthPct']:,.2f}%",
-            )
+        fy_options = (
+            [x for x in sorted(df["Financial Year"].dropna().unique().tolist()) if x != ""]
+            if "Financial Year" in df.columns else []
         )
+        state_options = sorted(df["State"].dropna().astype(str).unique().tolist()) if "State" in df.columns else []
+        prod_options = sorted(df["Prod Ctg"].dropna().astype(str).unique().tolist()) if "Prod Ctg" in df.columns else []
+        ctg_wise_options = sorted(df["Ctg Wise"].dropna().astype(str).unique().tolist()) if "Ctg Wise" in df.columns else []
 
-    for row in _chunk(card_items, 6):
-        cols = st.columns(len(row))
-        for idx, (label, value) in enumerate(row):
-            cols[idx].metric(label, value)
+        selected_fy = st.multiselect("Financial Year", fy_options, default=[])
+        st.markdown("<hr>", unsafe_allow_html=True)
+        selected_state = st.multiselect("State", state_options, default=[])
+        st.markdown("<hr>", unsafe_allow_html=True)
+        selected_prod = st.multiselect("Prod Category", prod_options, default=[])
+        st.markdown("<hr>", unsafe_allow_html=True)
+        selected_ctg_wise = st.multiselect("Category Wise", ctg_wise_options, default=[])
 
-    st.subheader("Filters")
-    filter_cols = st.columns(4)
-    fy_options = [x for x in sorted(df["Financial Year"].dropna().unique().tolist()) if x != ""] if "Financial Year" in df.columns else []
-    state_options = sorted(df["State"].dropna().astype(str).unique().tolist()) if "State" in df.columns else []
-    prod_options = sorted(df["Prod Ctg"].dropna().astype(str).unique().tolist()) if "Prod Ctg" in df.columns else []
-    ctg_wise_options = sorted(df["Ctg Wise"].dropna().astype(str).unique().tolist()) if "Ctg Wise" in df.columns else []
+        st.markdown("<br>", unsafe_allow_html=True)
+        n_active = sum([
+            bool(selected_fy), bool(selected_state),
+            bool(selected_prod), bool(selected_ctg_wise),
+        ])
+        if n_active:
+            st.caption(f"{n_active} filter(s) active")
+        else:
+            st.caption("No filters applied — showing all data")
 
-    selected_fy = filter_cols[0].multiselect("Financial Year", fy_options, default=[])
-    selected_state = filter_cols[1].multiselect("State", state_options, default=[])
-    selected_prod = filter_cols[2].multiselect("Prod Ctg", prod_options, default=[])
-    selected_ctg_wise = filter_cols[3].multiselect("Ctg Wise", ctg_wise_options, default=[])
-
+    # Apply filters
     filtered_df = df.copy()
     if selected_fy:
         filtered_df = filtered_df[filtered_df["Financial Year"].isin(selected_fy)]
@@ -389,27 +664,81 @@ def main():
     if selected_ctg_wise:
         filtered_df = filtered_df[filtered_df["Ctg Wise"].astype(str).isin(selected_ctg_wise)]
 
-    st.subheader("Pivot Table")
-    pivot_cfg = st.columns(4)
-    all_columns = filtered_df.columns.tolist()
-    numeric_columns = [c for c in all_columns if pd.api.types.is_numeric_dtype(filtered_df[c])]
-    dimension_columns = [c for c in all_columns if c not in numeric_columns]
+    # Recompute KPIs on filtered data so cards always reflect current selection
+    flt_kpis = _compute_kpis(filtered_df) if n_active else kpis
 
-    pivot_index = pivot_cfg[0].multiselect(
-        "Rows",
-        dimension_columns,
-        default=[c for c in ["Financial Year", "Prod Ctg"] if c in dimension_columns],
+    # ── Header bar ───────────────────────────────────────────────────────────
+    rows_shown = f"{len(filtered_df):,}"
+    total_rows = f"{kpis['totalRows']:,}"
+    st.markdown(
+        f"""
+        <div class="pbi-header">
+            <div class="pbi-header-title">📊&nbsp;&nbsp;Primary Sales — 5-Year Analysis</div>
+            <div class="pbi-header-meta">
+                <span class="pbi-header-dot"></span>Live&nbsp;&nbsp;|&nbsp;&nbsp;
+                Rows:&nbsp;<strong>{rows_shown}</strong> / {total_rows}&nbsp;&nbsp;|&nbsp;&nbsp;
+                Source:&nbsp;{source.upper()}
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
-    pivot_columns = pivot_cfg[1].selectbox("Columns", ["(None)"] + dimension_columns, index=0)
-    default_values = [c for c in ["Net Value", "Volume (Tonnes)"] if c in numeric_columns]
-    if not default_values and numeric_columns:
-        default_values = [numeric_columns[0]]
-    pivot_values = pivot_cfg[2].multiselect(
-        "Values",
-        numeric_columns,
-        default=default_values,
-    )
-    agg_name = pivot_cfg[3].selectbox("Aggregation", ["sum", "mean", "count", "min", "max"], index=0)
+
+    # ── KPI cards ─────────────────────────────────────────────────────────────
+    st.markdown(_section_title_html("Key Performance Indicators", "📌"), unsafe_allow_html=True)
+
+    card_items: list[tuple[str, str]] = [
+        ("Best FY by Volume", str(flt_kpis["bestFY"])),
+        ("Peak Volume (T)", f"{flt_kpis['peakVolume']:,.2f}"),
+        ("Total Volume (T)", f"{flt_kpis['totalVolume']:,.2f}"),
+        ("Total Net Value", str(flt_kpis["totalNetValue"])),
+        ("Avg / Litre Value", f"₹{flt_kpis['avgPerLitreValue']:,.2f}"),
+        ("Avg / Litre Cost", f"₹{flt_kpis['avgPerLitreCost']:,.2f}"),
+    ]
+
+    if flt_kpis.get("cagrByYear"):
+        for cagr_item in flt_kpis["cagrByYear"]:
+            card_items.append(
+                (f"CAGR {cagr_item['fromFY']}→{cagr_item['toFY']}", f"{cagr_item['cagrPct']:,.2f}%")
+            )
+    else:
+        cagr_fallback = "—" if flt_kpis.get("cagrPct") is None else f"{flt_kpis['cagrPct']:,.2f}%"
+        card_items.append(("CAGR % (Net Value)", cagr_fallback))
+
+    for growth_item in flt_kpis.get("yearlyGrowth", []):
+        card_items.append(
+            (f"Growth {growth_item['fy']}", f"{growth_item['growthPct']:,.2f}%")
+        )
+
+    for row_items in _chunk(card_items, 6):
+        cols = st.columns(len(row_items))
+        for idx, (label, value) in enumerate(row_items):
+            color = _CARD_COLORS[card_items.index((label, value)) % len(_CARD_COLORS)]
+            cols[idx].markdown(_kpi_card_html(label, value, color), unsafe_allow_html=True)
+        st.markdown("<div style='margin-bottom:10px'></div>", unsafe_allow_html=True)
+
+    # ── Pivot Table ───────────────────────────────────────────────────────────
+    st.markdown(_section_title_html("Pivot Table", "📋"), unsafe_allow_html=True)
+
+    with st.container():
+        st.markdown('<div class="pbi-pivot-cfg">', unsafe_allow_html=True)
+        pivot_cfg = st.columns([3, 2, 3, 2])
+        all_columns = filtered_df.columns.tolist()
+        numeric_columns = [c for c in all_columns if pd.api.types.is_numeric_dtype(filtered_df[c])]
+        dimension_columns = [c for c in all_columns if c not in numeric_columns]
+
+        pivot_index = pivot_cfg[0].multiselect(
+            "Rows",
+            dimension_columns,
+            default=[c for c in ["Financial Year", "Prod Ctg"] if c in dimension_columns],
+        )
+        pivot_columns = pivot_cfg[1].selectbox("Columns", ["(None)"] + dimension_columns, index=0)
+        default_values = [c for c in ["Net Value", "Volume (Tonnes)"] if c in numeric_columns]
+        if not default_values and numeric_columns:
+            default_values = [numeric_columns[0]]
+        pivot_values = pivot_cfg[2].multiselect("Values", numeric_columns, default=default_values)
+        agg_name = pivot_cfg[3].selectbox("Aggregation", ["sum", "mean", "count", "min", "max"], index=0)
+        st.markdown("</div>", unsafe_allow_html=True)
 
     pivot_col_arg = None if pivot_columns == "(None)" else pivot_columns
     try:
@@ -439,7 +768,6 @@ def main():
         if pivot_col_arg is not None and len(pivot_values) > 1 and pivot_df.columns.nlevels >= 2:
             pivot_df.columns = pivot_df.columns.swaplevel(0, 1)
             pivot_df = pivot_df.sort_index(axis=1, level=0)
-
         pivot_df.columns = [
             " | ".join([str(x) for x in col if str(x) != ""]).strip()
             for col in pivot_df.columns.to_flat_index()
@@ -449,17 +777,27 @@ def main():
 
     max_cells = 180_000
     if not pivot_display.empty and pivot_display.shape[0] * max(pivot_display.shape[1], 1) > max_cells:
-        st.warning("Pivot result is large, showing first 10,000 rows to keep UI responsive.")
-        st.dataframe(pivot_display.head(10_000), use_container_width=True, height=450)
+        st.warning("Pivot result is large — showing first 10,000 rows.")
+        st.dataframe(pivot_display.head(10_000), use_container_width=True, height=480)
+    elif not pivot_display.empty:
+        st.dataframe(pivot_display, use_container_width=True, height=480)
     else:
-        st.dataframe(pivot_display, use_container_width=True, height=450)
+        st.info("Select at least one Row and one Value to build the pivot table.")
 
-    st.download_button(
-        label="Export Pivot CSV",
-        data=pivot_display.to_csv(index=False).encode("utf-8"),
-        file_name="primary-sales-pivot-export.csv",
-        mime="text/csv",
-    )
+    col_export, col_info = st.columns([2, 8])
+    with col_export:
+        st.download_button(
+            label="⬇ Export Pivot CSV",
+            data=pivot_display.to_csv(index=False).encode("utf-8"),
+            file_name="primary-sales-pivot-export.csv",
+            mime="text/csv",
+            disabled=pivot_display.empty,
+        )
+    with col_info:
+        if not pivot_display.empty:
+            st.caption(
+                f"{pivot_display.shape[0]:,} rows × {pivot_display.shape[1]:,} columns"
+            )
 
 
 if __name__ == "__main__":
