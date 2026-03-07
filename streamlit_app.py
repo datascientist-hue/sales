@@ -8,8 +8,21 @@ import pandas as pd
 import streamlit as st
 
 BASE_DIR = Path(__file__).resolve().parent
-PARQUET_PATH = BASE_DIR / "Primary5YearSales .parquet"
+PARQUET_PATH = BASE_DIR / "Primary5YearSales.parquet"
 MAPPING_PATH = BASE_DIR / "mapping.xlsx"
+
+
+def _resolve_parquet_path() -> Path | None:
+    candidates = [
+        BASE_DIR / "Primary5YearSales.parquet",
+        BASE_DIR / "Primary5YearSales .parquet",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+
+    discovered = sorted(BASE_DIR.glob("*.parquet"))
+    return discovered[0] if discovered else None
 
 NUMERIC_FIELDS = [
     "Qty in Nos",
@@ -134,7 +147,11 @@ def _attach_category_mapping(df: pd.DataFrame, mapping_df: pd.DataFrame) -> pd.D
 
 
 def _prepare_dataframe_from_parquet() -> pd.DataFrame:
-    df = pd.read_parquet(PARQUET_PATH)
+    parquet_path = _resolve_parquet_path()
+    if parquet_path is None:
+        raise FileNotFoundError("Parquet file not found in workspace")
+
+    df = pd.read_parquet(parquet_path)
     df.columns = [str(col).strip() for col in df.columns]
 
     valid_columns = [col for col in df.columns if col not in {"", "--"}]
@@ -276,7 +293,7 @@ def _compute_kpis(df: pd.DataFrame) -> dict[str, Any]:
 @st.cache_data(show_spinner=False)
 def load_data(parquet_mtime: float):
     if parquet_mtime <= 0:
-        raise FileNotFoundError(f"Parquet file not found: {PARQUET_PATH}")
+        raise FileNotFoundError("Parquet file not found in workspace")
 
     df = _prepare_dataframe_from_parquet()
     kpis = _compute_kpis(df)
@@ -589,11 +606,12 @@ def main():
     # Inject Power BI CSS
     st.markdown(_PBI_CSS, unsafe_allow_html=True)
 
-    if not PARQUET_PATH.exists():
-        st.error(f"Parquet data file not found: {PARQUET_PATH}")
+    parquet_path = _resolve_parquet_path()
+    if parquet_path is None:
+        st.error(f"Parquet data file not found in: {BASE_DIR}")
         st.stop()
 
-    parquet_mtime = PARQUET_PATH.stat().st_mtime
+    parquet_mtime = parquet_path.stat().st_mtime
     mapping_mtime = MAPPING_PATH.stat().st_mtime if MAPPING_PATH.exists() else None
 
     with st.spinner("Loading data…"):
