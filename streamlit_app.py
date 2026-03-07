@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import io
 from pathlib import Path
 from typing import Any
 
@@ -9,8 +8,7 @@ import pandas as pd
 import streamlit as st
 
 BASE_DIR = Path(__file__).resolve().parent
-CSV_PATH = BASE_DIR / "Primary5YearSales.csv"
-PARQUET_PATH = BASE_DIR / "Primary5YearSales.parquet"
+PARQUET_PATH = BASE_DIR / "Primary5YearSales .parquet"
 MAPPING_PATH = BASE_DIR / "mapping.xlsx"
 
 NUMERIC_FIELDS = [
@@ -96,25 +94,6 @@ def _compute_group_metrics(df: pd.DataFrame, key_col: str, avg_col: str, yoy_col
     return merged
 
 
-def _read_csv_with_fallbacks(path: Path) -> pd.DataFrame:
-    read_attempts = [
-        {"encoding": "utf-8", "low_memory": False},
-        {"encoding": "utf-8-sig", "low_memory": False},
-        {"encoding": "cp1252", "low_memory": False},
-        {"encoding": "latin1", "low_memory": False},
-    ]
-
-    last_error: Exception | None = None
-    for params in read_attempts:
-        try:
-            return pd.read_csv(path, **params)
-        except UnicodeDecodeError as error:
-            last_error = error
-
-    raw_text = path.read_bytes().decode("latin1", errors="replace").replace("\xa0", " ")
-    return pd.read_csv(io.StringIO(raw_text), low_memory=False)
-
-
 @st.cache_data(show_spinner=False)
 def _load_category_mapping(mapping_mtime: float | None) -> pd.DataFrame:
     if mapping_mtime is None or not MAPPING_PATH.exists():
@@ -154,8 +133,8 @@ def _attach_category_mapping(df: pd.DataFrame, mapping_df: pd.DataFrame) -> pd.D
     return out
 
 
-def _prepare_dataframe_from_csv() -> pd.DataFrame:
-    df = _read_csv_with_fallbacks(CSV_PATH)
+def _prepare_dataframe_from_parquet() -> pd.DataFrame:
+    df = pd.read_parquet(PARQUET_PATH)
     df.columns = [str(col).strip() for col in df.columns]
 
     valid_columns = [col for col in df.columns if col not in {"", "--"}]
@@ -299,7 +278,7 @@ def load_data(parquet_mtime: float):
     if parquet_mtime <= 0:
         raise FileNotFoundError(f"Parquet file not found: {PARQUET_PATH}")
 
-    df = pd.read_parquet(PARQUET_PATH)
+    df = _prepare_dataframe_from_parquet()
     kpis = _compute_kpis(df)
     return df, kpis, "parquet"
 
@@ -627,17 +606,38 @@ def main():
     with st.sidebar:
         st.markdown('<div class="sidebar-header">🔽&nbsp; Filters</div>', unsafe_allow_html=True)
 
+        dsm_col = next((col for col in df.columns if str(col).strip().lower() == "dsm"), None)
+        normalized_col_map = {
+            "".join(ch for ch in str(col).strip().lower() if ch.isalnum()): col
+            for col in df.columns
+        }
+        db_code_col = (
+            normalized_col_map.get("dbcode")
+            or normalized_col_map.get("db")
+            or normalized_col_map.get("depot")
+        )
         fy_options = (
             [x for x in sorted(df["Financial Year"].dropna().unique().tolist()) if x != ""]
             if "Financial Year" in df.columns else []
         )
         state_options = sorted(df["State"].dropna().astype(str).unique().tolist()) if "State" in df.columns else []
+        db_code_options = (
+            sorted(df[db_code_col].dropna().astype(str).str.strip().replace("", np.nan).dropna().unique().tolist())
+            if db_code_col
+            else []
+        )
+        dsm_options = sorted(df[dsm_col].dropna().astype(str).unique().tolist()) if dsm_col else []
         prod_options = sorted(df["Prod Ctg"].dropna().astype(str).unique().tolist()) if "Prod Ctg" in df.columns else []
         ctg_wise_options = sorted(df["Ctg Wise"].dropna().astype(str).unique().tolist()) if "Ctg Wise" in df.columns else []
 
         selected_fy = st.multiselect("Financial Year", fy_options, default=[])
         st.markdown("<hr>", unsafe_allow_html=True)
         selected_state = st.multiselect("State", state_options, default=[])
+        st.markdown("<hr>", unsafe_allow_html=True)
+        db_label = "DB Code" if normalized_col_map.get("dbcode") else "DB Code (from DB/Depot)"
+        selected_db_code = st.multiselect(db_label, db_code_options, default=[])
+        st.markdown("<hr>", unsafe_allow_html=True)
+        selected_dsm = st.multiselect("DSM", dsm_options, default=[])
         st.markdown("<hr>", unsafe_allow_html=True)
         selected_prod = st.multiselect("Prod Category", prod_options, default=[])
         st.markdown("<hr>", unsafe_allow_html=True)
@@ -646,6 +646,8 @@ def main():
         st.markdown("<br>", unsafe_allow_html=True)
         n_active = sum([
             bool(selected_fy), bool(selected_state),
+            bool(selected_db_code),
+            bool(selected_dsm),
             bool(selected_prod), bool(selected_ctg_wise),
         ])
         if n_active:
@@ -659,6 +661,10 @@ def main():
         filtered_df = filtered_df[filtered_df["Financial Year"].isin(selected_fy)]
     if selected_state:
         filtered_df = filtered_df[filtered_df["State"].astype(str).isin(selected_state)]
+    if selected_db_code and db_code_col:
+        filtered_df = filtered_df[filtered_df[db_code_col].astype(str).str.strip().isin(selected_db_code)]
+    if selected_dsm and dsm_col:
+        filtered_df = filtered_df[filtered_df[dsm_col].astype(str).isin(selected_dsm)]
     if selected_prod:
         filtered_df = filtered_df[filtered_df["Prod Ctg"].astype(str).isin(selected_prod)]
     if selected_ctg_wise:
@@ -717,87 +723,233 @@ def main():
             cols[idx].markdown(_kpi_card_html(label, value, color), unsafe_allow_html=True)
         st.markdown("<div style='margin-bottom:10px'></div>", unsafe_allow_html=True)
 
-    # ── Pivot Table ───────────────────────────────────────────────────────────
-    st.markdown(_section_title_html("Pivot Table", "📋"), unsafe_allow_html=True)
+    tabs = st.tabs(["Pivot Table", "Trend Chart"])
 
-    with st.container():
-        st.markdown('<div class="pbi-pivot-cfg">', unsafe_allow_html=True)
-        pivot_cfg = st.columns([3, 2, 3, 2])
-        all_columns = filtered_df.columns.tolist()
-        numeric_columns = [c for c in all_columns if pd.api.types.is_numeric_dtype(filtered_df[c])]
-        dimension_columns = [c for c in all_columns if c not in numeric_columns]
+    with tabs[0]:
+        # ── Pivot Table ───────────────────────────────────────────────────────
+        st.markdown(_section_title_html("Pivot Table", "📋"), unsafe_allow_html=True)
 
-        pivot_index = pivot_cfg[0].multiselect(
-            "Rows",
-            dimension_columns,
-            default=[c for c in ["Financial Year", "Prod Ctg"] if c in dimension_columns],
-        )
-        pivot_columns = pivot_cfg[1].selectbox("Columns", ["(None)"] + dimension_columns, index=0)
-        default_values = [c for c in ["Net Value", "Volume (Tonnes)"] if c in numeric_columns]
-        if not default_values and numeric_columns:
-            default_values = [numeric_columns[0]]
-        pivot_values = pivot_cfg[2].multiselect("Values", numeric_columns, default=default_values)
-        agg_name = pivot_cfg[3].selectbox("Aggregation", ["sum", "mean", "count", "min", "max"], index=0)
-        st.markdown("</div>", unsafe_allow_html=True)
+        with st.container():
+            st.markdown('<div class="pbi-pivot-cfg">', unsafe_allow_html=True)
+            pivot_cfg = st.columns([3, 2, 3, 2])
+            all_columns = filtered_df.columns.tolist()
+            numeric_columns = [c for c in all_columns if pd.api.types.is_numeric_dtype(filtered_df[c])]
+            dimension_columns = [c for c in all_columns if c not in numeric_columns]
 
-    pivot_col_arg = None if pivot_columns == "(None)" else pivot_columns
-    try:
-        if pivot_index and pivot_values:
-            pivot_df = pd.pivot_table(
-                filtered_df,
-                index=pivot_index,
-                columns=pivot_col_arg,
-                values=pivot_values,
-                aggfunc=agg_name,
-                fill_value=0,
+            pivot_index = pivot_cfg[0].multiselect(
+                "Rows",
+                dimension_columns,
+                default=[c for c in ["Financial Year", "Prod Ctg"] if c in dimension_columns],
             )
-        elif pivot_values:
-            summary_data: dict[str, list[float]] = {}
-            for metric in pivot_values:
-                series = filtered_df[metric]
-                agg_result = getattr(series, agg_name)() if hasattr(series, agg_name) else series.sum()
-                summary_data[f"{agg_name}({metric})"] = [agg_result]
-            pivot_df = pd.DataFrame(summary_data)
-        else:
+            pivot_columns = pivot_cfg[1].selectbox("Columns", ["(None)"] + dimension_columns, index=0)
+            default_values = [c for c in ["Net Value", "Volume (Tonnes)"] if c in numeric_columns]
+            if not default_values and numeric_columns:
+                default_values = [numeric_columns[0]]
+            pivot_values = pivot_cfg[2].multiselect("Values", numeric_columns, default=default_values)
+            agg_name = pivot_cfg[3].selectbox("Aggregation", ["sum", "mean", "count", "min", "max"], index=0)
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        pivot_col_arg = None if pivot_columns == "(None)" else pivot_columns
+        try:
+            if pivot_index and pivot_values:
+                pivot_df = pd.pivot_table(
+                    filtered_df,
+                    index=pivot_index,
+                    columns=pivot_col_arg,
+                    values=pivot_values,
+                    aggfunc=agg_name,
+                    fill_value=0,
+                )
+            elif pivot_values:
+                summary_data: dict[str, list[float]] = {}
+                for metric in pivot_values:
+                    series = filtered_df[metric]
+                    agg_result = getattr(series, agg_name)() if hasattr(series, agg_name) else series.sum()
+                    summary_data[f"{agg_name}({metric})"] = [agg_result]
+                pivot_df = pd.DataFrame(summary_data)
+            else:
+                pivot_df = pd.DataFrame()
+        except Exception as error:
+            st.error(f"Failed to build pivot table: {error}")
             pivot_df = pd.DataFrame()
-    except Exception as error:
-        st.error(f"Failed to build pivot table: {error}")
-        pivot_df = pd.DataFrame()
 
-    if isinstance(pivot_df.columns, pd.MultiIndex):
-        if pivot_col_arg is not None and len(pivot_values) > 1 and pivot_df.columns.nlevels >= 2:
-            pivot_df.columns = pivot_df.columns.swaplevel(0, 1)
-            pivot_df = pivot_df.sort_index(axis=1, level=0)
-        pivot_df.columns = [
-            " | ".join([str(x) for x in col if str(x) != ""]).strip()
-            for col in pivot_df.columns.to_flat_index()
-        ]
+        if isinstance(pivot_df.columns, pd.MultiIndex):
+            if pivot_col_arg is not None and len(pivot_values) > 1 and pivot_df.columns.nlevels >= 2:
+                pivot_df.columns = pivot_df.columns.swaplevel(0, 1)
+                pivot_df = pivot_df.sort_index(axis=1, level=0)
+            pivot_df.columns = [
+                " | ".join([str(x) for x in col if str(x) != ""]).strip()
+                for col in pivot_df.columns.to_flat_index()
+            ]
 
-    pivot_display = pivot_df.reset_index() if not pivot_df.empty else pd.DataFrame()
+        pivot_display = pivot_df.reset_index() if not pivot_df.empty else pd.DataFrame()
 
-    max_cells = 180_000
-    if not pivot_display.empty and pivot_display.shape[0] * max(pivot_display.shape[1], 1) > max_cells:
-        st.warning("Pivot result is large — showing first 10,000 rows.")
-        st.dataframe(pivot_display.head(10_000), use_container_width=True, height=480)
-    elif not pivot_display.empty:
-        st.dataframe(pivot_display, use_container_width=True, height=480)
-    else:
-        st.info("Select at least one Row and one Value to build the pivot table.")
+        max_cells = 180_000
+        if not pivot_display.empty and pivot_display.shape[0] * max(pivot_display.shape[1], 1) > max_cells:
+            st.warning("Pivot result is large — showing first 10,000 rows.")
+            st.dataframe(pivot_display.head(10_000), use_container_width=True, height=480)
+        elif not pivot_display.empty:
+            st.dataframe(pivot_display, use_container_width=True, height=480)
+        else:
+            st.info("Select at least one Row and one Value to build the pivot table.")
 
-    col_export, col_info = st.columns([2, 8])
-    with col_export:
-        st.download_button(
-            label="⬇ Export Pivot CSV",
-            data=pivot_display.to_csv(index=False).encode("utf-8"),
-            file_name="primary-sales-pivot-export.csv",
-            mime="text/csv",
-            disabled=pivot_display.empty,
-        )
-    with col_info:
-        if not pivot_display.empty:
-            st.caption(
-                f"{pivot_display.shape[0]:,} rows × {pivot_display.shape[1]:,} columns"
+        col_export, col_info = st.columns([2, 8])
+        with col_export:
+            st.download_button(
+                label="⬇ Export Pivot CSV",
+                data=pivot_display.to_csv(index=False).encode("utf-8"),
+                file_name="primary-sales-pivot-export.csv",
+                mime="text/csv",
+                disabled=pivot_display.empty,
             )
+        with col_info:
+            if not pivot_display.empty:
+                st.caption(
+                    f"{pivot_display.shape[0]:,} rows × {pivot_display.shape[1]:,} columns"
+                )
+
+    with tabs[1]:
+        st.markdown(_section_title_html("DSM Wise Trend Chart", "📈"), unsafe_allow_html=True)
+
+        if dsm_col is None:
+            st.info("DSM column not found in data, so trend chart is unavailable.")
+        elif "Inv Date" not in filtered_df.columns:
+            st.info("Invoice date column is missing, so trend chart is unavailable.")
+        else:
+            metric_options = [c for c in ["Net Value", "Volume (Tonnes)", "Qty in Ltrs/Kgs"] if c in filtered_df.columns]
+            if not metric_options:
+                st.info("No numeric metric available for trend chart.")
+            else:
+                dsm_cfg_cols = st.columns([2, 2])
+                metric_col = dsm_cfg_cols[0].selectbox("Trend Metric", metric_options, index=0, key="dsm_metric")
+                time_grain = dsm_cfg_cols[1].selectbox("View By", ["Year", "Month"], index=0, key="dsm_view_by")
+
+                chart_base = filtered_df[["Inv Date", dsm_col, metric_col]].copy()
+                chart_base = chart_base.dropna(subset=["Inv Date"])
+                chart_base[dsm_col] = chart_base[dsm_col].astype(str).str.strip()
+                chart_base = chart_base[chart_base[dsm_col] != ""]
+
+                if chart_base.empty:
+                    st.info("No dated records available for DSM trend chart with current filters.")
+                else:
+                    dsm_totals = (
+                        chart_base.groupby(dsm_col, dropna=False)[metric_col]
+                        .sum()
+                        .sort_values(ascending=False)
+                    )
+                    default_dsm = dsm_totals.head(5).index.tolist()
+                    selected_chart_dsms = st.multiselect(
+                        "DSM for Trend",
+                        options=dsm_totals.index.tolist(),
+                        default=default_dsm,
+                    )
+
+                    if selected_chart_dsms:
+                        chart_base = chart_base[chart_base[dsm_col].isin(selected_chart_dsms)]
+
+                    if time_grain == "Year":
+                        chart_base["Time Axis"] = np.where(
+                            chart_base["Inv Date"].dt.month >= 4,
+                            "FY " + chart_base["Inv Date"].dt.year.astype(str) + "-" + (chart_base["Inv Date"].dt.year + 1).astype(str).str[-2:],
+                            "FY " + (chart_base["Inv Date"].dt.year - 1).astype(str) + "-" + chart_base["Inv Date"].dt.year.astype(str).str[-2:],
+                        )
+                        trend_df = (
+                            chart_base.groupby(["Time Axis", dsm_col], dropna=False)[metric_col]
+                            .sum()
+                            .reset_index()
+                        )
+                        trend_df["_fy_start"] = trend_df["Time Axis"].map(_financial_year_start)
+                        trend_df = trend_df.sort_values(["_fy_start", dsm_col]).drop(columns=["_fy_start"])
+                    else:
+                        chart_base["Time Axis"] = chart_base["Inv Date"].dt.to_period("M").dt.to_timestamp()
+                        trend_df = (
+                            chart_base.groupby(["Time Axis", dsm_col], dropna=False)[metric_col]
+                            .sum()
+                            .reset_index()
+                            .sort_values(["Time Axis", dsm_col])
+                        )
+
+                    trend_pivot = trend_df.pivot(index="Time Axis", columns=dsm_col, values=metric_col).sort_index()
+
+                    if trend_pivot.empty:
+                        st.info("No trend data to plot for the selected DSM values.")
+                    else:
+                        dsm_x_label = "Financial Year" if time_grain == "Year" else "Month"
+                        st.line_chart(trend_pivot, use_container_width=True)
+                        st.caption(f"Chart Labels → X-axis: {dsm_x_label} | Y-axis: {metric_col} | Series: DSM")
+                        st.caption(f"{time_grain}ly trend by DSM for {metric_col}.")
+
+        st.markdown("<div style='margin:16px 0'></div>", unsafe_allow_html=True)
+        st.markdown(_section_title_html("Product Category Wise Trend Chart", "📈"), unsafe_allow_html=True)
+
+        if "Prod Ctg" not in filtered_df.columns:
+            st.info("Product Category column not found in data, so trend chart is unavailable.")
+        elif "Inv Date" not in filtered_df.columns:
+            st.info("Invoice date column is missing, so trend chart is unavailable.")
+        else:
+            metric_options = [c for c in ["Net Value", "Volume (Tonnes)", "Qty in Ltrs/Kgs"] if c in filtered_df.columns]
+            if not metric_options:
+                st.info("No numeric metric available for trend chart.")
+            else:
+                prod_cfg_cols = st.columns([2, 2])
+                metric_col = prod_cfg_cols[0].selectbox("Trend Metric", metric_options, index=0, key="prod_metric")
+                prod_time_grain = prod_cfg_cols[1].selectbox("View By", ["Month", "Year"], index=0, key="prod_view_by")
+
+                chart_base = filtered_df[["Inv Date", "Prod Ctg", metric_col]].copy()
+                chart_base = chart_base.dropna(subset=["Inv Date"])
+                chart_base["Prod Ctg"] = chart_base["Prod Ctg"].astype(str).str.strip()
+                chart_base = chart_base[chart_base["Prod Ctg"] != ""]
+
+                if chart_base.empty:
+                    st.info("No dated records available for Product Category trend chart with current filters.")
+                else:
+                    prod_totals = (
+                        chart_base.groupby("Prod Ctg", dropna=False)[metric_col]
+                        .sum()
+                        .sort_values(ascending=False)
+                    )
+                    default_prod = prod_totals.head(5).index.tolist()
+                    selected_prod_trend = st.multiselect(
+                        "Product Category for Trend",
+                        options=prod_totals.index.tolist(),
+                        default=default_prod,
+                        key="prod_trend_select",
+                    )
+
+                    if selected_prod_trend:
+                        chart_base = chart_base[chart_base["Prod Ctg"].isin(selected_prod_trend)]
+
+                    if prod_time_grain == "Year":
+                        chart_base["Time Axis"] = np.where(
+                            chart_base["Inv Date"].dt.month >= 4,
+                            "FY " + chart_base["Inv Date"].dt.year.astype(str) + "-" + (chart_base["Inv Date"].dt.year + 1).astype(str).str[-2:],
+                            "FY " + (chart_base["Inv Date"].dt.year - 1).astype(str) + "-" + chart_base["Inv Date"].dt.year.astype(str).str[-2:],
+                        )
+                        trend_df = (
+                            chart_base.groupby(["Time Axis", "Prod Ctg"], dropna=False)[metric_col]
+                            .sum()
+                            .reset_index()
+                        )
+                        trend_df["_fy_start"] = trend_df["Time Axis"].map(_financial_year_start)
+                        trend_df = trend_df.sort_values(["_fy_start", "Prod Ctg"]).drop(columns=["_fy_start"])
+                    else:
+                        chart_base["Time Axis"] = chart_base["Inv Date"].dt.to_period("M").dt.to_timestamp()
+                        trend_df = (
+                            chart_base.groupby(["Time Axis", "Prod Ctg"], dropna=False)[metric_col]
+                            .sum()
+                            .reset_index()
+                            .sort_values(["Time Axis", "Prod Ctg"])
+                        )
+
+                    trend_pivot = trend_df.pivot(index="Time Axis", columns="Prod Ctg", values=metric_col).sort_index()
+
+                    if trend_pivot.empty:
+                        st.info("No trend data to plot for the selected Product Categories.")
+                    else:
+                        prod_x_label = "Financial Year" if prod_time_grain == "Year" else "Month"
+                        st.line_chart(trend_pivot, use_container_width=True)
+                        st.caption(f"Chart Labels → X-axis: {prod_x_label} | Y-axis: {metric_col} | Series: Product Category")
+                        st.caption(f"{prod_time_grain}ly trend by Product Category for {metric_col}.")
 
 
 if __name__ == "__main__":
